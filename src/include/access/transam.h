@@ -49,6 +49,7 @@
 #define U64FromFullTransactionId(x)		((x).value)
 #define FullTransactionIdEquals(a, b)	((a).value == (b).value)
 #define FullTransactionIdPrecedes(a, b)	((a).value < (b).value)
+#define FullTransactionIdFollows(a, b)	((a).value > (b).value)
 #define FullTransactionIdIsValid(x)		TransactionIdIsValid(XidFromFullTransactionId(x))
 #define InvalidFullTransactionId		FullTransactionIdFromEpochAndXid(0, InvalidTransactionId)
 
@@ -68,6 +69,16 @@ FullTransactionIdFromEpochAndXid(uint32 epoch, TransactionId xid)
 	FullTransactionId result;
 
 	result.value = ((uint64) epoch) << 32 | xid;
+
+	return result;
+}
+
+static inline FullTransactionId
+FullTransactionIdFromU64(uint64 fxid)
+{
+	FullTransactionId result;
+
+	result.value = fxid;
 
 	return result;
 }
@@ -104,6 +115,14 @@ FullTransactionIdAdvance(FullTransactionId *dest)
 #define NormalTransactionIdFollows(id1, id2) \
 	(AssertMacro(TransactionIdIsNormal(id1) && TransactionIdIsNormal(id2)), \
 	(int32) ((id1) - (id2)) > 0)
+
+/* Extract xid from a value comprised of epoch and xid  */
+#define GetXidFromEpochXid(epochxid)			\
+	((uint32) (epochxid) & 0XFFFFFFFF)
+
+/* Extract epoch from a value comprised of epoch and xid  */
+#define GetEpochFromEpochXid(epochxid)			\
+	((uint32) ((epochxid) >> 32))
 
 /* ----------
  *		Object ID (OID) zero is InvalidOid.
@@ -225,6 +244,7 @@ extern XLogRecPtr TransactionIdGetCommitLSN(TransactionId xid);
 /* in transam/varsup.c */
 extern FullTransactionId GetNewTransactionId(bool isSubXact);
 extern void AdvanceNextFullTransactionIdPastXid(TransactionId xid);
+extern uint32 GetEpochForXid(TransactionId xid);
 extern FullTransactionId ReadNextFullTransactionId(void);
 extern void SetTransactionIdLimit(TransactionId oldest_datfrozenxid,
 								  Oid oldest_datoid);
