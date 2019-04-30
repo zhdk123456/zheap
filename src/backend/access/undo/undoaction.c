@@ -43,7 +43,11 @@ undo_record_comparator(const void *left, const void *right)
 	UnpackedUndoRecord *luur = ((UndoRecInfo *) left)->uur;
 	UnpackedUndoRecord *ruur = ((UndoRecInfo *) right)->uur;
 
-	if (luur->uur_reloid < ruur->uur_reloid)
+	if (luur->uur_rmid < ruur->uur_rmid)
+		return -1;
+	else if (luur->uur_rmid > ruur->uur_rmid)
+		return 1;
+	else if (luur->uur_reloid < ruur->uur_reloid)
 		return -1;
 	else if (luur->uur_reloid > ruur->uur_reloid)
 		return 1;
@@ -144,6 +148,7 @@ execute_undo_actions(FullTransactionId full_xid, UndoRecPtr from_urecptr,
 	 */
 	do
 	{
+		int			prev_rmid = -1;
 		Oid			prev_reloid = InvalidOid;
 		bool		blk_chain_complete;
 		int			i;
@@ -196,8 +201,9 @@ execute_undo_actions(FullTransactionId full_xid, UndoRecPtr from_urecptr,
 			 * If this undo is not for the same block then apply all undo
 			 * actions for the previous block.
 			 */
-			if (OidIsValid(prev_reloid) &&
-				(prev_reloid != uur->uur_reloid ||
+			if (prev_rmid >= 0 &&
+				(prev_rmid != uur->uur_rmid ||
+				 prev_reloid != uur->uur_reloid ||
 				 prev_fork != uur->uur_fork ||
 				 prev_block != uur->uur_block))
 			{
@@ -211,6 +217,7 @@ execute_undo_actions(FullTransactionId full_xid, UndoRecPtr from_urecptr,
 					prefetch_pages--;
 			}
 
+			prev_rmid = uur->uur_rmid;
 			prev_reloid = uur->uur_reloid;
 			prev_fork = uur->uur_fork;
 			prev_block = uur->uur_block;
@@ -236,14 +243,10 @@ execute_undo_actions(FullTransactionId full_xid, UndoRecPtr from_urecptr,
 	if (nopartial)
 	{
 		UndoPersistence persistence;
-		UndoLogControl *log = NULL;
 		UndoRecordInsertContext context = {{0}};
 
-		log = UndoLogGet(UndoRecPtrGetLogNo(to_urecptr), false);
-
-		LWLockAcquire(&log->mutex, LW_SHARED);
-		persistence = log->meta.persistence;
-		LWLockRelease(&log->mutex);
+		persistence =
+			UndoLogNumberGetPersistence(UndoRecPtrGetLogNo(to_urecptr));
 
 		BeginUndoRecordInsert(&context, persistence, 0, NULL);
 
@@ -260,24 +263,18 @@ execute_undo_actions(FullTransactionId full_xid, UndoRecPtr from_urecptr,
 
 		/* WAL log the undo apply progress. */
 		{
+			XLogRecPtr	lsn;
 			xl_undoapply_progress xlrec;
 
 			xlrec.urec_ptr = to_urecptr;
 			xlrec.progress = 1;
 
-			/*
-				* FIXME : We need to register undo buffers and set LSN for
-				* them that will be required for FPW of the undo buffers.
-				* This is currently not possible as undolog API only allows
-				* register buffer via backends and we can reach here via
-				* backend.
-				*/
 			XLogBeginInsert();
 			XLogRegisterData((char *) &xlrec, sizeof(xlrec));
 
-			/* RegisterUndoLogBuffers(2); */
-			(void) XLogInsert(RM_UNDOACTION_ID, XLOG_UNDO_APPLY_PROGRESS);
-			/* UndoLogBuffersSetLSN(recptr); */
+			RegisterUndoLogBuffers(&context, 2);
+			lsn = XLogInsert(RM_UNDOACTION_ID, XLOG_UNDO_APPLY_PROGRESS);
+			UndoLogBuffersSetLSN(&context, lsn);
 		}
 
 		END_CRIT_SECTION();

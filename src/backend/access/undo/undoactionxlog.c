@@ -27,16 +27,12 @@ undo_xlog_apply_progress(XLogReaderState *record)
 {
 	xl_undoapply_progress *xlrec = (xl_undoapply_progress *) XLogRecGetData(record);
 	UndoPersistence persistence;
-	UndoLogControl *log = NULL;
 	UndoRecordInsertContext context = {{0}};
 
-	log = UndoLogGet(UndoRecPtrGetLogNo(xlrec->urec_ptr), false);
+	persistence =
+		UndoLogNumberGetPersistence(UndoRecPtrGetLogNo(xlrec->urec_ptr));
 
-	LWLockAcquire(&log->mutex, LW_SHARED);
-	persistence = log->meta.persistence;
-	LWLockRelease(&log->mutex);
-
-	BeginUndoRecordInsert(&context, persistence, 0, NULL);
+	BeginUndoRecordInsert(&context, persistence, 0, record);
 
 	/* Update the progress in the transaction header. */
 	PrepareUpdateUndoActionProgress(&context, record, xlrec->urec_ptr,

@@ -197,7 +197,6 @@ PrepareUpdateUndoActionProgress(UndoRecordInsertContext *context,
 	BlockNumber cur_blk;
 	Page		page;
 	RelFileNode rnode;
-	UndoLogControl *log;
 	UndoPersistence persistence;
 	UndoPackContext ucontext = {{0}};
 	XactUndoRecordInfo *xact_info =
@@ -208,11 +207,7 @@ PrepareUpdateUndoActionProgress(UndoRecordInsertContext *context,
 
 	Assert(UndoRecPtrIsValid(xact_urp));
 
-	log = UndoLogGet(UndoRecPtrGetLogNo(xact_urp), false);
-
-	LWLockAcquire(&log->mutex, LW_SHARED);
-	persistence = log->meta.persistence;
-	LWLockRelease(&log->mutex);
+	persistence = UndoRecPtrGetPersistence(xact_urp);
 
 	/*
 	 * Temporary undo logs are discarded on transaction commit so we don't

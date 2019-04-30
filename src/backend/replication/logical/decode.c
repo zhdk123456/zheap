@@ -155,13 +155,10 @@ LogicalDecodingProcessRecord(LogicalDecodingContext *ctx, XLogReaderState *recor
 		case RM_REPLORIGIN_ID:
 		case RM_GENERIC_ID:
 		case RM_UNDOLOG_ID:
+		case RM_UNDOACTION_ID:
 			/* just deal with xid, and done */
 			ReorderBufferProcessXid(ctx->reorder, XLogRecGetXid(record),
 									buf.origptr);
-			break;
-		case RM_UNDOACTION_ID:
-			/* Logical decoding is not yet implemented for undoactions. */
-			Assert(0);
 			break;
 		case RM_NEXT_ID:
 			elog(ERROR, "unexpected RM_NEXT_ID rmgr_id: %u", (RmgrIds) XLogRecGetRmid(buf.record));
