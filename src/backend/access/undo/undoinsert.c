@@ -100,7 +100,7 @@ UndoRecordPrepareTransInfo(UndoRecordInsertContext *context, UndoRecPtr urecptr,
 	BlockNumber cur_blk;
 	Page		page;
 	RelFileNode rnode;
-	UndoLogControl *log;
+	UndoLogSlot *slot;
 	UndoPackContext ucontext = {{0}};
 	XactUndoRecordInfo *xact_info =
 	&context->xact_urec_info[context->nxact_urec_info];
@@ -115,13 +115,22 @@ UndoRecordPrepareTransInfo(UndoRecordInsertContext *context, UndoRecPtr urecptr,
 	if (!UndoRecPtrIsValid(xact_urp))
 		return;
 
-	log = UndoLogGet(UndoRecPtrGetLogNo(xact_urp), false);
+	/*
+	 * We should only be updating transactions headers of transactions that
+	 * are in a log that we are current attached to (because we're writing a
+	 * new transaction immediately after it).  Therefore we can access the
+	 * immutable persistence property without locking, and further down we
+	 * don't have to worry about the slot being recycled before we acquire the
+	 * mutex.
+	 */
+	slot = UndoLogGetSlot(UndoRecPtrGetLogNo(xact_urp), false);
+	Assert(InRecovery || AmAttachedToUndoLogSlot(slot));
 
 	/*
 	 * Temporary undo logs are discarded on transaction commit so we don't
 	 * need to do anything.
 	 */
-	if (log->meta.persistence == UNDO_TEMP)
+	if (slot->meta.persistence == UNDO_TEMP)
 		return;
 
 	/*
@@ -129,27 +138,13 @@ UndoRecordPrepareTransInfo(UndoRecordInsertContext *context, UndoRecPtr urecptr,
 	 * discard worker doesn't remove the record while we are in process of
 	 * reading it.
 	 */
-	LWLockAcquire(&log->discard_lock, LW_SHARED);
-
-	/*
-	 * The absence of previous transaction's undo indicate that this backend
-	 * is preparing its first undo in which case we have nothing to update.
-	 *
-	 * Refer comments in UndoFetchRecord.
-	 */
-	if (InHotStandby)
+	LWLockAcquire(&slot->discard_update_lock, LW_SHARED);
+	/* Check if it is already discarded. */
+	if (UndoLogIsDiscarded(xact_urp))
 	{
-		if (UndoLogIsDiscarded(xact_urp))
-			return;
-	}
-	else
-	{
-		LWLockAcquire(&log->discard_lock, LW_SHARED);
-		if (xact_urp < log->oldest_data)
-		{
-			LWLockRelease(&log->discard_lock);
-			return;
-		}
+		/* Release lock and return. */
+		LWLockRelease(&slot->discard_update_lock);
+		return;
 	}
 
 	UndoRecPtrAssignRelFileNode(rnode, xact_urp);
@@ -189,7 +184,7 @@ UndoRecordPrepareTransInfo(UndoRecordInsertContext *context, UndoRecPtr urecptr,
 	xact_info->urecptr = xact_urp;
 	context->nxact_urec_info++;
 
-	LWLockRelease(&log->discard_lock);
+	LWLockRelease(&slot->discard_update_lock);
 }
 
 
@@ -908,12 +903,16 @@ UndoFetchRecord(UndoRecPtr urp, BlockNumber blkno, OffsetNumber offset,
 	/* Find the undo record pointer we are interested in. */
 	while (true)
 	{
-		UndoLogControl *log;
+		UndoLogSlot *slot;
 
 		logno = UndoRecPtrGetLogNo(urp);
-		log = UndoLogGet(logno, true);
-		if (log == NULL)
+		slot = UndoLogGetSlot(logno, true);
+		if (slot == NULL)
 		{
+			/*
+			 * The undo log number is unknown.  Presumably it has been
+			 * entirely discarded.
+			 */
 			urp = InvalidUndoRecPtr;
 			break;
 		}
@@ -946,20 +945,25 @@ UndoFetchRecord(UndoRecPtr urp, BlockNumber blkno, OffsetNumber offset,
 		}
 		else
 		{
-			LWLockAcquire(&log->discard_lock, LW_SHARED);
-			if (urp < log->oldest_data)
+			LWLockAcquire(&slot->discard_lock, LW_SHARED);
+			if (slot->logno != logno || urp < slot->oldest_data)
 			{
-				LWLockRelease(&log->discard_lock);
+				/*
+				 * The slot has been recycled because the undo log was
+				 * entirely discarded, or the pointer is before the oldest
+				 * data.
+				 */
+				LWLockRelease(&slot->discard_lock);
 				urp = InvalidUndoRecPtr;
 				break;
 			}
 		}
 
 		/* Fetch the current undo record. */
-		UndoGetOneRecord(urec, urp, rnode, log->meta.persistence, &buffer);
+		UndoGetOneRecord(urec, urp, rnode, slot->meta.persistence, &buffer);
 
 		/* Release the discard lock after fetching the record. */
-		LWLockRelease(&log->discard_lock);
+		LWLockRelease(&slot->discard_lock);
 
 		if (blkno == InvalidBlockNumber)
 			break;
@@ -1098,20 +1102,20 @@ UndoBulkFetchRecord(UndoRecPtr *from_urecptr, UndoRecPtr to_urecptr,
 	while (1)
 	{
 		BlockNumber from_blkno;
-		UndoLogControl *log;
+		UndoLogSlot *slot;
 		UndoPersistence persistence;
 		int			size;
 		int			logno;
 
 		logno = UndoRecPtrGetLogNo(urecptr);
-		log = UndoLogGet(logno, true);
-		if (log == NULL)
+		slot = UndoLogGetSlot(logno, true);
+		if (slot == NULL)
 		{
 			if (BufferIsValid(buffer))
 				UnlockReleaseBuffer(buffer);
 			return NULL;
 		}
-		persistence = log->meta.persistence;
+		persistence = slot->meta.persistence;
 
 		UndoRecPtrAssignRelFileNode(rnode, urecptr);
 		to_blkno = UndoRecPtrGetBlockNum(to_urecptr);
@@ -1168,10 +1172,15 @@ UndoBulkFetchRecord(UndoRecPtr *from_urecptr, UndoRecPtr to_urecptr,
 			}
 			else
 			{
-				LWLockAcquire(&log->discard_lock, LW_SHARED);
-				if (urecptr < log->oldest_data)
+				LWLockAcquire(&slot->discard_lock, LW_SHARED);
+				if (slot->logno != logno || urecptr < slot->oldest_data)
 				{
-					LWLockRelease(&log->discard_lock);
+					/*
+					 * The undo log slot has been recycled because it was
+					 * entirely discarded, or the data has been discarded
+					 * already.
+					 */
+					LWLockRelease(&slot->discard_lock);
 					break;
 				}
 			}
@@ -1180,7 +1189,7 @@ UndoBulkFetchRecord(UndoRecPtr *from_urecptr, UndoRecPtr to_urecptr,
 			UndoGetOneRecord(uur, urecptr, rnode, persistence, &buffer);
 
 			/* Release the discard lock after fetching the record. */
-			LWLockRelease(&log->discard_lock);
+			LWLockRelease(&slot->discard_lock);
 		}
 		else
 			UndoGetOneRecord(uur, urecptr, rnode, persistence, &buffer);
@@ -1325,7 +1334,7 @@ UndoGetPrevRecordLen(UndoRecPtr urp, Buffer input_buffer,
 	BlockNumber cur_blk = UndoRecPtrGetBlockNum(urp);
 	Buffer		buffer = input_buffer;
 	Page		page = NULL;
-	char	   *pagedata;
+	char	   *pagedata = NULL;
 	char		prevlen[2];
 	RelFileNode rnode;
 	int			byte_to_read = sizeof(uint16);
