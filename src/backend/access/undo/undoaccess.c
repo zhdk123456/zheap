@@ -63,8 +63,6 @@ static UnpackedUndoRecord *UndoGetOneRecord(UnpackedUndoRecord *urec,
 static void UndoRecordPrepareTransInfo(UndoRecordInsertContext *context,
 						   UndoRecPtr urecptr,
 						   UndoRecPtr xact_urp);
-static void UndoRecordUpdateTransInfo(UndoRecordInsertContext *context,
-						  int idx);
 static int UndoGetBufferSlot(UndoRecordInsertContext *context,
 				  RelFileNode rnode, BlockNumber blk,
 				  ReadBufferMode rbm);
@@ -202,6 +200,72 @@ UndoRecordPrepareTransInfo(UndoRecordInsertContext *context, UndoRecPtr urecptr,
 }
 
 /*
+ * Update the progress of the undo record in the transaction header.
+ */
+void
+PrepareUpdateUndoActionProgress(UndoRecordInsertContext *context,
+								XLogReaderState *xlog_record,
+								UndoRecPtr xact_urp, int progress)
+{
+	Buffer		buffer = InvalidBuffer;
+	BlockNumber cur_blk;
+	Page		page;
+	RelFileNode rnode;
+	UndoPersistence persistence;
+	UndoPackContext ucontext = {{0}};
+	XactUndoRecordInfo *xact_info =
+	&context->xact_urec_info[context->nxact_urec_info];
+	int			starting_byte;
+	int			bufidx;
+	int			index = 0;
+
+	Assert(UndoRecPtrIsValid(xact_urp));
+
+	persistence = UndoRecPtrGetPersistence(xact_urp);
+
+	/*
+	 * Temporary undo logs are discarded on transaction commit so we don't
+	 * need to do anything.
+	 */
+	if (persistence == UNDO_TEMP)
+		return;
+
+	/* It shouldn't be discarded. */
+	Assert(!UndoLogIsDiscarded(xact_urp));
+
+	UndoRecPtrAssignRelFileNode(rnode, xact_urp);
+	cur_blk = UndoRecPtrGetBlockNum(xact_urp);
+	starting_byte = UndoRecPtrGetPageOffset(xact_urp);
+
+	/* Initiate reading the undo record. */
+	BeginUnpackUndo(&ucontext);
+	while (1)
+	{
+		bufidx = UndoGetBufferSlot(context, rnode, cur_blk, RBM_NORMAL);
+		xact_info->idx_undo_buffers[index++] = bufidx;
+		buffer = context->prepared_undo_buffers[bufidx].buf;
+		page = BufferGetPage(buffer);
+
+		/* Do actual decoding. */
+		UnpackUndoData(&ucontext, page, starting_byte);
+
+		/* We just want to fetch upto transaction header so stop after that. */
+		if (ucontext.stage > UNDO_PACK_STAGE_TRANSACTION)
+			break;
+
+		/* Could not fetch the complete header so go to the next block. */
+		starting_byte = UndoLogBlockHeaderSize;
+		cur_blk++;
+	}
+
+	FinishUnpackUndo(&ucontext, &xact_info->uur);
+
+	xact_info->urecptr = xact_urp;
+	xact_info->uur.uur_progress = progress;
+	context->nxact_urec_info++;
+}
+
+/*
  * Overwrite the first undo record of the previous transaction to update its
  * next pointer.
  *
@@ -209,7 +273,7 @@ UndoRecordPrepareTransInfo(UndoRecordInsertContext *context, UndoRecPtr urecptr,
  * This must be called under the critical section.  This will just overwrite the
  * header of the undo record.
  */
-static void
+void
 UndoRecordUpdateTransInfo(UndoRecordInsertContext *context, int idx)
 {
 	Page		page = NULL;
@@ -217,6 +281,12 @@ UndoRecordUpdateTransInfo(UndoRecordInsertContext *context, int idx)
 	int			i = 0;
 	UndoPackContext ucontext = {{0}};
 	XactUndoRecordInfo *xact_info = &context->xact_urec_info[idx];
+
+	/*
+	 * We've pinned the undo buffers in UndoRecordPrepareTransInfo, so
+	 * it shouldn't be discarded.
+	 */
+	Assert(!UndoLogIsDiscarded(xact_info->urecptr));
 
 	/*
 	 * Update the next transactions start urecptr in the transaction header.
@@ -760,6 +830,13 @@ InsertPreparedUndo(UndoRecordInsertContext *context)
 			/* undo record can't use buffers more than MAX_BUFFER_PER_UNDO. */
 			Assert(bufidx < MAX_BUFFER_PER_UNDO);
 		} while (true);
+
+		/*
+		 * Set the current undo location for a transaction.  This is required
+		 * to perform rollback during abort of transaction.
+		 */
+		SetCurrentUndoLocation(prepared_undo->urp,
+							   context->alloc_context.persistence);
 
 		/* Advance the insert pointer past this record. */
 		UndoLogAdvanceFinal(prepared_undo->urp, prepared_undo->size);

@@ -12,6 +12,7 @@ subdir = src/backend/access/undo
 top_builddir = ../../../..
 include $(top_builddir)/src/Makefile.global
 
-OBJS = undoaccess.o undolog.o undorecord.o
+OBJS = discardworker.o undoaction.o undoactionxlog.o undodiscard.o undoaccess.o \
+		undolog.o undorecord.o undorequest.o undoworker.o
 
 include $(top_srcdir)/src/backend/common.mk

@@ -32,6 +32,7 @@
 #include "access/tableam.h"
 #include "access/transam.h"
 #include "access/twophase.h"
+#include "access/undoworker.h"
 #include "access/xact.h"
 #include "access/xlog_internal.h"
 #include "catalog/namespace.h"
@@ -1955,6 +1956,17 @@ static struct config_bool ConfigureNamesBool[] =
 		NULL, NULL, NULL
 	},
 
+	{
+		{"enable_undo_launcher", PGC_POSTMASTER, DEVELOPER_OPTIONS,
+			gettext_noop("Decides whether to launch an undo worker."),
+			NULL,
+			GUC_NOT_IN_SAMPLE
+		},
+		&enable_undo_launcher,
+		true,
+		NULL, NULL, NULL
+	},
+
 	/* End-of-list marker */
 	{
 		{NULL, 0, 0, NULL, NULL}, NULL, false, NULL, NULL, NULL
@@ -2922,6 +2934,16 @@ static struct config_int ConfigureNamesInt[] =
 		},
 		&wal_retrieve_retry_interval,
 		5000, 1, INT_MAX,
+		NULL, NULL, NULL
+	},
+	{
+		{"rollback_overflow_size", PGC_USERSET, RESOURCES_MEM,
+			gettext_noop("Rollbacks greater than this size are done lazily"),
+			NULL,
+			GUC_UNIT_MB
+		},
+		&rollback_overflow_size,
+		64, 0, MAX_KILOBYTES,
 		NULL, NULL, NULL
 	},
 

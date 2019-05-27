@@ -49,6 +49,7 @@
 #define U64FromFullTransactionId(x)		((x).value)
 #define FullTransactionIdEquals(a, b)	((a).value == (b).value)
 #define FullTransactionIdPrecedes(a, b)	((a).value < (b).value)
+#define FullTransactionIdFollows(a, b)	((a).value > (b).value)
 #define FullTransactionIdIsValid(x)		TransactionIdIsValid(XidFromFullTransactionId(x))
 #define InvalidFullTransactionId		FullTransactionIdFromEpochAndXid(0, InvalidTransactionId)
 
@@ -68,6 +69,16 @@ FullTransactionIdFromEpochAndXid(uint32 epoch, TransactionId xid)
 	FullTransactionId result;
 
 	result.value = ((uint64) epoch) << 32 | xid;
+
+	return result;
+}
+
+static inline FullTransactionId
+FullTransactionIdFromU64(uint64 fxid)
+{
+	FullTransactionId result;
+
+	result.value = fxid;
 
 	return result;
 }
@@ -225,6 +236,7 @@ extern XLogRecPtr TransactionIdGetCommitLSN(TransactionId xid);
 /* in transam/varsup.c */
 extern FullTransactionId GetNewTransactionId(bool isSubXact);
 extern void AdvanceNextFullTransactionIdPastXid(TransactionId xid);
+extern uint32 GetEpochForXid(TransactionId xid);
 extern FullTransactionId ReadNextFullTransactionId(void);
 extern void SetTransactionIdLimit(TransactionId oldest_datfrozenxid,
 								  Oid oldest_datoid);

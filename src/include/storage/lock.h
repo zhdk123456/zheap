@@ -145,6 +145,12 @@ typedef enum LockTagType
 	LOCKTAG_VIRTUALTRANSACTION, /* virtual transaction (ditto) */
 	LOCKTAG_SPECULATIVE_TOKEN,	/* speculative insertion Xid and token */
 	LOCKTAG_OBJECT,				/* non-relation database object */
+
+	/*
+	 * Note: object ID has same representation as in pg_depend and
+	 * pg_description, but notice that we are constraining SUBID to 16 bits.
+	 * Also, we use DB OID = 0 for shared objects such as tablespaces.
+	 */
 	LOCKTAG_USERLOCK,			/* reserved for old contrib/userlock code */
 	LOCKTAG_ADVISORY			/* advisory user locks */
 } LockTagType;

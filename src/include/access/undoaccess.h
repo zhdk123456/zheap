@@ -111,5 +111,9 @@ extern UndoRecInfo *UndoBulkFetchRecord(UndoRecPtr *from_urecptr,
 extern void UndoRecordRelease(UnpackedUndoRecord *urec);
 extern UndoRecPtr UndoGetPrevUndoRecptr(UndoRecPtr urp, Buffer buffer,
 					  UndoPersistence upersistence);
+extern void PrepareUpdateUndoActionProgress(UndoRecordInsertContext *context,
+								XLogReaderState *xlog_record,
+								UndoRecPtr urecptr, int progress);
+extern void UndoRecordUpdateTransInfo(UndoRecordInsertContext *context, int idx);
 
 #endif							/* UNDOINSERT_H */
